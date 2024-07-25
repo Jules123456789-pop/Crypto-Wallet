@@ -24,6 +24,13 @@ type TransactionPayload = record {
   from_user_id : nat64;
   amount : nat64;
 };
+type UpdateUserPayload = record {
+  user_id : nat64;
+  email : opt text;
+  first_name : opt text;
+  last_name : opt text;
+  phone_number : opt text;
+};
 type User = record {
   id : nat64;
   username : text;
@@ -43,10 +50,13 @@ type UserPayload = record {
 };
 service : {
   create_user : (UserPayload) -> (Result);
+  delete_user : (nat64) -> (Result_1);
   deposit_funds : (DepositPayload) -> (Result_1);
   get_transaction_history : (nat64) -> (Result_2) query;
   get_user_balance : (nat64) -> (Result_3) query;
+  get_user_details : (nat64) -> (Result) query;
   get_user_points : (nat64) -> (Result_3) query;
   redeem_points : (PointsPayload) -> (Result_1);
   send_transaction : (TransactionPayload) -> (Result_4);
+  update_user : (UpdateUserPayload) -> (Result_1);
 }

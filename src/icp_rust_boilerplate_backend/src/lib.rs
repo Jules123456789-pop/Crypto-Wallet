@@ -92,6 +92,15 @@ struct UserPayload {
 }
 
 #[derive(candid::CandidType, Deserialize, Serialize)]
+struct UpdateUserPayload {
+    user_id: u64,
+    first_name: Option<String>,
+    last_name: Option<String>,
+    email: Option<String>,
+    phone_number: Option<String>,
+}
+
+#[derive(candid::CandidType, Deserialize, Serialize)]
 struct TransactionPayload {
     from_user_id: u64,
     to_user_id: u64,
@@ -104,7 +113,6 @@ struct PointsPayload {
     points: u64,
 }
 
-// Deposit funds payload
 #[derive(candid::CandidType, Deserialize, Serialize)]
 struct DepositPayload {
     user_id: u64,
@@ -140,14 +148,13 @@ fn create_user(payload: UserPayload) -> Result<User, Message> {
         ));
     }
 
-    let phone_regex = Regex::new(r"^\+?[1-9]\d{1,14}$").unwrap(); // Basic regex for international phone numbers
+    let phone_regex = Regex::new(r"^\+?[1-9]\d{1,14}$").unwrap();
     if !phone_regex.is_match(&payload.phone_number) {
         return Err(Message::InvalidPayload(
             "Invalid phone number format".to_string(),
         ));
     }
 
-    // Ensure the email is unique for each user
     let is_email_unique = USER_STORAGE.with(|storage| {
         storage
             .borrow()
@@ -158,6 +165,17 @@ fn create_user(payload: UserPayload) -> Result<User, Message> {
         return Err(Message::InvalidPayload("Email already exists".to_string()));
     }
 
+    let is_username_unique = USER_STORAGE.with(|storage| {
+        let username = format!("{}{}", payload.first_name.to_lowercase(), payload.last_name.to_lowercase());
+        storage
+            .borrow()
+            .iter()
+            .all(|(_, user)| user.username != username)
+    });
+    if !is_username_unique {
+        return Err(Message::InvalidPayload("Username already exists".to_string()));
+    }
+
     let id = ID_COUNTER
         .with(|counter| {
             let current_value = *counter.borrow().get();
@@ -165,7 +183,6 @@ fn create_user(payload: UserPayload) -> Result<User, Message> {
         })
         .expect("Cannot increment ID counter");
 
-    // Generate a username by concatenating the first and last name, making it to be of defined length
     let username = format!(
         "{}{}",
         payload.first_name.to_lowercase(),
@@ -183,11 +200,60 @@ fn create_user(payload: UserPayload) -> Result<User, Message> {
         email: payload.email,
         phone_number: payload.phone_number,
         created_at: current_time(),
-        balance: 0, // Initialize balance to 0
-        points: 0,  // Initialize points to 0
+        balance: 0,
+        points: 0,
     };
     USER_STORAGE.with(|storage| storage.borrow_mut().insert(id, user.clone()));
     Ok(user)
+}
+
+#[ic_cdk::update]
+fn update_user(payload: UpdateUserPayload) -> Result<Message, Message> {
+    USER_STORAGE.with(|storage| {
+        let mut storage = storage.borrow_mut();
+        if let Some(mut user) = storage.remove(&payload.user_id) {
+            if let Some(first_name) = payload.first_name {
+                user.first_name = first_name;
+            }
+            if let Some(last_name) = payload.last_name {
+                user.last_name = last_name;
+            }
+            if let Some(email) = payload.email {
+                let email_regex = Regex::new(r"^[^\s@]+@[^\s@]+\.[^\s@]+$").unwrap();
+                if !email_regex.is_match(&email) {
+                    return Err(Message::InvalidPayload(
+                        "Invalid email address format".to_string(),
+                    ));
+                }
+                user.email = email;
+            }
+            if let Some(phone_number) = payload.phone_number {
+                let phone_regex = Regex::new(r"^\+?[1-9]\d{1,14}$").unwrap();
+                if !phone_regex.is_match(&phone_number) {
+                    return Err(Message::InvalidPayload(
+                        "Invalid phone number format".to_string(),
+                    ));
+                }
+                user.phone_number = phone_number;
+            }
+            storage.insert(payload.user_id, user);
+            Ok(Message::Success("User updated successfully".to_string()))
+        } else {
+            Err(Message::NotFound("User not found".to_string()))
+        }
+    })
+}
+
+#[ic_cdk::update]
+fn delete_user(user_id: u64) -> Result<Message, Message> {
+    USER_STORAGE.with(|storage| {
+        let mut storage = storage.borrow_mut();
+        if storage.remove(&user_id).is_some() {
+            Ok(Message::Success("User deleted successfully".to_string()))
+        } else {
+            Err(Message::NotFound("User not found".to_string()))
+        }
+    })
 }
 
 #[ic_cdk::update]
@@ -352,6 +418,18 @@ fn get_user_points(user_id: u64) -> Result<u64, Message> {
             .iter()
             .find(|(_, user)| user.id == user_id)
             .map(|(_, user)| user.points)
+            .ok_or(Message::NotFound("User not found".to_string()))
+    })
+}
+
+#[ic_cdk::query]
+fn get_user_details(user_id: u64) -> Result<User, Message> {
+    USER_STORAGE.with(|storage| {
+        storage
+            .borrow()
+            .iter()
+            .find(|(_, user)| user.id == user_id)
+            .map(|(_, user)| user.clone())
             .ok_or(Message::NotFound("User not found".to_string()))
     })
 }
