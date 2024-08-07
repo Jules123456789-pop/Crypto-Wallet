@@ -1,5 +1,6 @@
 #[macro_use]
 extern crate serde;
+
 use candid::{Decode, Encode};
 use ic_cdk::api::time;
 use ic_stable_structures::memory_manager::{MemoryId, MemoryManager, VirtualMemory};
@@ -118,6 +119,10 @@ enum Message {
     NotFound(String),
     InvalidPayload(String),
     Unauthorized(String),
+    DuplicateEmail(String),
+    InsufficientBalance(String),
+    InsufficientPoints(String),
+    InternalError(String),
 }
 
 #[ic_cdk::update]
@@ -128,8 +133,7 @@ fn create_user(payload: UserPayload) -> Result<User, Message> {
         || payload.phone_number.is_empty()
     {
         return Err(Message::InvalidPayload(
-            "Ensure 'first_name', 'last_name', 'email', and 'phone_number' are provided."
-                .to_string(),
+            "Ensure 'first_name', 'last_name', 'email', and 'phone_number' are provided.".to_string(),
         ));
     }
 
@@ -155,7 +159,7 @@ fn create_user(payload: UserPayload) -> Result<User, Message> {
             .all(|(_, user)| user.email != payload.email)
     });
     if !is_email_unique {
-        return Err(Message::InvalidPayload("Email already exists".to_string()));
+        return Err(Message::DuplicateEmail("Email already exists".to_string()));
     }
 
     let id = ID_COUNTER
@@ -189,6 +193,82 @@ fn create_user(payload: UserPayload) -> Result<User, Message> {
     USER_STORAGE.with(|storage| storage.borrow_mut().insert(id, user.clone()));
     Ok(user)
 }
+
+#[ic_cdk::update]
+fn update_user(user_id: u64, payload: UserPayload) -> Result<User, Message> {
+    if payload.first_name.is_empty()
+        || payload.last_name.is_empty()
+        || payload.email.is_empty()
+        || payload.phone_number.is_empty()
+    {
+        return Err(Message::InvalidPayload(
+            "Ensure 'first_name', 'last_name', 'email', and 'phone_number' are provided.".to_string(),
+        ));
+    }
+
+    let email_regex = Regex::new(r"^[^\s@]+@[^\s@]+\.[^\s@]+$").unwrap();
+    if !email_regex.is_match(&payload.email) {
+        return Err(Message::InvalidPayload("Invalid email address format".to_string()));
+    }
+
+    let phone_regex = Regex::new(r"^\+?[1-9]\d{1,14}$").unwrap(); // Basic regex for international phone numbers
+    if !phone_regex.is_match(&payload.phone_number) {
+        return Err(Message::InvalidPayload("Invalid phone number format".to_string()));
+    }
+
+    // Ensure the email is unique for each user (except the current user)
+    let is_email_unique = USER_STORAGE.with(|storage| {
+        storage
+            .borrow()
+            .iter()
+            .all(|(id, user)| id.clone() == user_id || user.email != payload.email)
+    });
+    if !is_email_unique {
+        return Err(Message::DuplicateEmail("Email already exists".to_string()));
+    }
+
+    USER_STORAGE.with(|storage| {
+        let mut storage = storage.borrow_mut();
+        if let Some(mut user) = storage.remove(&user_id) {
+            user.first_name = payload.first_name;
+            user.last_name = payload.last_name;
+            user.email = payload.email;
+            user.phone_number = payload.phone_number;
+            storage.insert(user_id, user.clone());
+            Ok(user)
+        } else {
+            Err(Message::NotFound("User not found".to_string()))
+        }
+    })
+}
+
+#[ic_cdk::update]
+fn delete_user(user_id: u64) -> Result<Message, Message> {
+    USER_STORAGE.with(|storage| {
+        let mut storage = storage.borrow_mut();
+        if storage.remove(&user_id).is_some() {
+            // Remove associated transactions
+            TRANSACTION_STORAGE.with(|trans_storage| {
+                let mut trans_storage = trans_storage.borrow_mut();
+                let transaction_keys_to_remove: Vec<u64> = trans_storage
+                    .iter()
+                    .filter(|(_, transaction)| {
+                        transaction.from_user_id == user_id || transaction.to_user_id == user_id
+                    })
+                    .map(|(id, _)| id.clone()) // Use `clone()` instead of dereferencing
+                    .collect();
+                
+                for key in transaction_keys_to_remove {
+                    trans_storage.remove(&key);
+                }
+            });
+            Ok(Message::Success("User deleted successfully".to_string()))
+        } else {
+            Err(Message::NotFound("User not found".to_string()))
+        }
+    })
+}
+
 
 #[ic_cdk::update]
 fn deposit_funds(payload: DepositPayload) -> Result<Message, Message> {
@@ -249,7 +329,9 @@ fn send_transaction(payload: TransactionPayload) -> Result<Transaction, Message>
     let mut to_user = to_user.unwrap();
 
     if from_user.balance < payload.amount {
-        return Err(Message::Error("Insufficient balance.".to_string()));
+        return Err(Message::InsufficientBalance(
+            "Insufficient balance.".to_string(),
+        ));
     }
 
     from_user.balance -= payload.amount;
@@ -304,7 +386,9 @@ fn redeem_points(payload: PointsPayload) -> Result<Message, Message> {
                 )))
             } else {
                 storage.insert(payload.user_id, user); // Re-insert user in case of error
-                Err(Message::Error("Insufficient points.".to_string()))
+                Err(Message::InsufficientPoints(
+                    "Insufficient points.".to_string(),
+                ))
             }
         } else {
             Err(Message::NotFound("User not found".to_string()))
@@ -353,6 +437,55 @@ fn get_user_points(user_id: u64) -> Result<u64, Message> {
             .find(|(_, user)| user.id == user_id)
             .map(|(_, user)| user.points)
             .ok_or(Message::NotFound("User not found".to_string()))
+    })
+}
+
+#[ic_cdk::query]
+fn list_all_users() -> Vec<User> {
+    USER_STORAGE.with(|storage| {
+        storage
+            .borrow()
+            .iter() // Use `iter()` to iterate over all entries
+            .map(|(_, user)| user.clone()) // Clone each user
+            .collect() // Collect the users into a vector
+    })
+}
+
+
+#[ic_cdk::query]
+fn list_all_transactions() -> Vec<Transaction> {
+    TRANSACTION_STORAGE.with(|storage| {
+        storage
+            .borrow()
+            .iter() // Use `iter()` to iterate over all entries
+            .map(|(_, transaction)| transaction.clone()) // Clone each transaction
+            .collect() // Collect the transactions into a vector
+    })
+}
+
+
+#[ic_cdk::query]
+fn search_user_by_email(email: String) -> Result<User, Message> {
+    USER_STORAGE.with(|storage| {
+        storage
+            .borrow()
+            .iter() // Use `iter()` to iterate over all entries
+            .find(|(_, user)| user.email == email) // Find user by email
+            .map(|(_, user)| user.clone()) // Clone the user if found
+            .ok_or(Message::NotFound("User not found".to_string())) // Return error if not found
+    })
+}
+
+
+#[ic_cdk::query]
+fn search_user_by_phone(phone: String) -> Result<User, Message> {
+    USER_STORAGE.with(|storage| {
+        storage
+            .borrow()
+            .iter() // Use `iter()` to iterate over all entries
+            .find(|(_, user)| user.phone_number == phone) // Find user by phone number
+            .map(|(_, user)| user.clone()) // Clone the user if found
+            .ok_or(Message::NotFound("User not found".to_string())) // Return error if not found
     })
 }
 
